@@ -175,12 +175,9 @@ fn main() -> Result<()> {
     let manual_peer: Option<String> = if args.len() >= 4 { Some(args[3].clone()) } else { None };
 
     let app = config::init_or_create(listen_port)?;
-    println!("[config] dir={}", app.dir.display());
     println!("[config] device_id={}", app.config.device_id);
     println!("[config] device_name={}", app.config.device_name);
     println!("[config] pubkey_b64={}", app.identity.public_key_b64());
-    println!("[config] config_path={}", app.config_path.display());
-    println!("[config] key_path={}", app.key_path.display());
     
     let device_id = app.config.device_id.clone();
     let device_name = app.config.device_name.clone();
@@ -203,8 +200,8 @@ fn main() -> Result<()> {
         peer_mgr.add_or_update_peer("manual-peer", addr);
     } else {
         let pm = peer_mgr.clone();
-        mdns::browse_peers(&mdns, device_id.clone(), move |peer_id, addr| {
-            println!("[mdns] resolved peer_id={} addr={}", peer_id, addr);
+        mdns::browse_peers(&mdns, device_id.clone(), move |addr, peer_id| {
+            println!("[mdns] resolved: peer_id={} addr={}", peer_id, addr);
             pm.add_or_update_peer(&peer_id, addr);
         })?;
         }

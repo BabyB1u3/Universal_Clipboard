@@ -74,16 +74,9 @@ where
         for event in receiver {
             match event {
                 ServiceEvent::ServiceFound(ty, fullname) => {
-                    println!("[mdns] found: ty={} name={}", ty, fullname);
+                    println!("[mdns] found: type={} name={}", ty, fullname);
                 }
                 ServiceEvent::ServiceResolved(info) => {
-                    println!(
-                        "[mdns] resolved: fullname={} port={} addrs={:?} props={:?}",
-                        info.get_fullname(),
-                        info.get_port(),
-                        info.get_addresses(),
-                        info.get_properties()
-                    );
                     // 从 TXT 里读 device_id
                     let peer_id = info
                         .get_property("device_id")
