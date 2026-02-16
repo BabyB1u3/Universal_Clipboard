@@ -2,25 +2,21 @@ mod clipboard;
 mod net;
 mod config;
 mod mdns;
+mod peers;
 
 use anyhow::{anyhow, Result};
 use clipboard::{ArboardClipboard, ClipboardBackend};
 use std::env;
-use std::net::{TcpListener, TcpStream};
-use std::sync::{mpsc, Arc, Mutex};
+use std::net::{TcpListener};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use std::collections::VecDeque;
+use peers::PeerManager;
 
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
-}
-
-enum SenderCmd {
-    SetPeer(String),
-    Send(Vec<u8>),
 }
 
 /// 共享状态：listener 和 watcher 都要访问
@@ -107,99 +103,9 @@ fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>) -> std::thr
     })
 }
 
-fn start_sender(
-    rx: mpsc::Receiver<SenderCmd>,
-    device_id: String,
-    device_name: String,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut peer_addr: Option<String> = None;
-        let mut stream: Option<TcpStream> = None;
-
-        // 缓存少量待发送消息（peer 未就绪或断线时）
-        let mut pending: VecDeque<Vec<u8>> = VecDeque::new();
-        const MAX_PENDING: usize = 64;
-
-        fn ensure_connected(
-            peer_addr: &str,
-            stream: &mut Option<TcpStream>,
-            device_id: &str,
-            device_name: &str,
-        ) -> Result<()> {
-            if stream.is_some() {
-                return Ok(());
-            }
-
-            let mut s = TcpStream::connect(peer_addr)?;
-            s.set_nodelay(true).ok();
-
-            let hello = uniclip_proto::WireMessage::Hello {
-                version: uniclip_proto::PROTOCOL_VERSION,
-                device: uniclip_proto::DeviceInfo {
-                    device_id: device_id.to_string(),
-                    device_name: device_name.to_string(),
-                },
-            };
-            let bytes = uniclip_proto::encode(&hello)?;
-            net::send_frame(&mut s, &bytes)?;
-
-            println!("[sender] connected to {}", peer_addr);
-            *stream = Some(s);
-            Ok(())
-        }
-
-        loop {
-            match rx.recv() {
-                Ok(SenderCmd::SetPeer(addr)) => {
-                    if peer_addr.as_deref() != Some(addr.as_str()) {
-                        println!("[sender] peer set to {}", addr);
-                        peer_addr = Some(addr);
-                        stream = None; // 强制用新 peer 重连
-                    }
-                }
-                Ok(SenderCmd::Send(payload)) => {
-                    if pending.len() >= MAX_PENDING {
-                        pending.pop_front();
-                    }
-                    pending.push_back(payload);
-                }
-                Err(_) => {
-                    println!("[sender] channel closed, exit");
-                    break;
-                }
-            }
-
-            // 尝试 flush pending
-            let Some(addr) = peer_addr.clone() else {
-                continue; // 还没发现 peer
-            };
-
-            if let Err(e) = ensure_connected(&addr, &mut stream, &device_id, &device_name) {
-                println!("[sender] {} (retry in 1s)", e);
-                std::thread::sleep(Duration::from_secs(1));
-                continue;
-            }
-
-            while let Some(payload) = pending.pop_front() {
-                if let Some(s) = stream.as_mut() {
-                    if let Err(e) = net::send_frame(s, &payload) {
-                        println!("[sender] send failed: {} (drop connection)", e);
-                        stream = None;
-                        // 发送失败把这条塞回去，下次重连再发
-                        pending.push_front(payload);
-                        break;
-                    } else {
-                        println!("[SENT] ClipboardPush");
-                    }
-                }
-            }
-        }
-    })
-}
-
 fn start_watcher(
     shared: Arc<Mutex<SharedState>>,
-    tx: mpsc::Sender<SenderCmd>,
+    peer_mgr: Arc<PeerManager>,
     device_id: String,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -236,7 +142,7 @@ fn start_watcher(
                 let msg = uniclip_proto::WireMessage::ClipboardPush { item };
                 match uniclip_proto::encode(&msg) {
                     Ok(bytes) => {
-                        let _ = tx.send(SenderCmd::Send(bytes));
+                        peer_mgr.broadcast(bytes);
                     }
                     Err(e) => println!("[watcher] encode error: {}", e),
                 }
@@ -278,8 +184,8 @@ fn main() -> Result<()> {
     
     let device_id = app.config.device_id.clone();
     let device_name = app.config.device_name.clone();
-    
-    let (cmd_tx, cmd_rx) = mpsc::channel::<SenderCmd>();
+
+    let peer_mgr = Arc::new(PeerManager::new(device_id.clone(), device_name.clone()));
 
     let shared = Arc::new(Mutex::new(SharedState {
         rx_event_recent: uniclip_core::RecentSet::new(8192, Duration::from_secs(180)),
@@ -287,24 +193,21 @@ fn main() -> Result<()> {
     }));
 
     let _t_listener = start_listener(listen_port, shared.clone());
-    let _t_sender = start_sender(cmd_rx, device_id.clone(), device_name.clone());
-    let _t_watcher = start_watcher(shared.clone(), cmd_tx.clone(), device_id.clone());
+    let _t_watcher = start_watcher(shared.clone(), peer_mgr.clone(), device_id.clone());
 
     let mdns = mdns_sd::ServiceDaemon::new()?;
     mdns::advertise(&mdns, &device_id, &device_name, listen_port)?;
 
     if let Some(addr) = manual_peer {
         // 手动指定 peer
-        let _ = cmd_tx.send(SenderCmd::SetPeer(addr));
+        peer_mgr.add_or_update_peer("manual-peer", addr);
     } else {
-        println!("[mdns] browsing...");
-        // 自动发现第一个 peer
-        mdns::browse_first_peer(&mdns, device_id.clone(), move |addr, peer_id| {
-            println!("[mdns] found peer {} ({})", addr, peer_id);
-            let _ = cmd_tx.send(SenderCmd::SetPeer(addr));
+        let pm = peer_mgr.clone();
+        mdns::browse_peers(&mdns, device_id.clone(), move |peer_id, addr| {
+            println!("[mdns] resolved peer_id={} addr={}", peer_id, addr);
+            pm.add_or_update_peer(&peer_id, addr);
         })?;
-        println!("[mdns] browse thread spawned");
-    }
+        }
 
     // 主线程不退出
     loop {

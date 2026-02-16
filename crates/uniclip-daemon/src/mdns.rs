@@ -59,8 +59,7 @@ pub fn advertise(
 }
 
 /// 浏览局域网内服务（mDNS browse）
-/// 找到第一个“不是自己”的 peer 后，回调 on_peer(addr, peer_device_id)
-pub fn browse_first_peer<F>(
+pub fn browse_peers<F>(
     daemon: &ServiceDaemon,
     self_device_id: String,
     mut on_peer: F,
@@ -109,10 +108,6 @@ where
 
                     let addr = format!("{}:{}", ip, port);
                     on_peer(addr, peer_id);
-
-                    // “单 peer”策略：找到第一个就不再继续
-                    //TODO: multiple peer connection
-                    break;
                 }
                 ServiceEvent::ServiceRemoved(ty, fullname) => {
                     println!("[mdns] removed: ty={} name={}", ty, fullname);
