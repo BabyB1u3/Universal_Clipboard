@@ -1,30 +1,50 @@
-use std::time::Duration;
+mod clipboard;
+
+use clipboard::{ArboardClipboard, ClipboardBackend};
+use std::time::{Duration, SystemTime};
 
 fn now_ms() -> u64 {
-    // 获取系统时间
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    t.as_millis() as u64
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
-fn main() {
-    let device_id = "dev-local-1";
-
+fn main() -> anyhow::Result<()> {
+    let device_id = "dev-local-1"; //TODO: Load from config
     let mut recent = uniclip_core::RecentSet::new(2048, Duration::from_secs(60));
 
-    let item1 = uniclip_core::make_text_item(device_id, now_ms(), "hello".to_string());
-    let item2 = uniclip_core::make_text_item(device_id, now_ms(), "hello".to_string());
-    let item3 = uniclip_core::make_text_item(device_id, now_ms(), "hello2".to_string());
+    let mut cb = ArboardClipboard::new()?;
 
-    println!("item1 id={}", item1.id);
-    println!("item2 id={}", item2.id);
-    println!("item3 id={}", item3.id);
+    println!("uniclip-daemon polling clipboard (text) ...");
 
-    println!("new item1? {}", recent.check_and_remember(&item1.id)); // true
-    println!("new item2? {}", recent.check_and_remember(&item2.id)); // false
-    println!("new item3? {}", recent.check_and_remember(&item3.id)); // true
+    let mut last_seen_id: Option<String> = None;
 
-    let msg = uniclip_proto::WireMessage::ClipboardPush { item: item1 };
-    println!("wire msg = {:?}", msg);
+    loop {
+        if let Some(text) = cb.get_text()? {
+            // 构造 item + 计算 id
+            let item = uniclip_core::make_text_item(device_id, now_ms(), text);
+
+            // 如果 id 没变，跳过
+            if last_seen_id.as_deref() == Some(&item.id) {
+                std::thread::sleep(Duration::from_millis(300));
+                continue;
+            }
+            last_seen_id = Some(item.id.clone());
+
+            // recent 去重
+            //TODO: 收到网络的 item 也会塞进 recent，用来断环
+            if !recent.check_and_remember(&item.id) {
+                std::thread::sleep(Duration::from_millis(300));
+                continue;
+            }
+
+            // MVP test
+            println!("[LOCAL NEW] id={} from={} at={} payload={:?}",
+                item.id, item.from_device_id, item.created_at_ms, item.payload
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(300));
+    }
 }

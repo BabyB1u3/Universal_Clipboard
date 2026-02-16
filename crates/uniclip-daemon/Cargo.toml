@@ -8,3 +8,5 @@ uniclip-core = { path = "../uniclip-core" }
 uniclip-proto = { path = "../uniclip-proto" }
 uniclip-crypto = { path = "../uniclip-crypto" }
 time = "0.3"
+arboard = "3"
+anyhow = "1"
