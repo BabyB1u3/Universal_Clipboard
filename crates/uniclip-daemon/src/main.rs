@@ -275,11 +275,11 @@ fn main() -> Result<()> {
     println!("[config] pubkey_b64={}", app.identity.public_key_b64());
     println!("[config] config_path={}", app.config_path.display());
     println!("[config] key_path={}", app.key_path.display());
-
-    let (cmd_tx, cmd_rx) = mpsc::channel::<SenderCmd>();
-
+    
     let device_id = app.config.device_id.clone();
     let device_name = app.config.device_name.clone();
+    
+    let (cmd_tx, cmd_rx) = mpsc::channel::<SenderCmd>();
 
     let shared = Arc::new(Mutex::new(SharedState {
         rx_event_recent: uniclip_core::RecentSet::new(8192, Duration::from_secs(180)),
@@ -294,14 +294,16 @@ fn main() -> Result<()> {
     mdns::advertise(&mdns, &device_id, &device_name, listen_port)?;
 
     if let Some(addr) = manual_peer {
-        // 手动指定 peer（调试用）
+        // 手动指定 peer
         let _ = cmd_tx.send(SenderCmd::SetPeer(addr));
     } else {
+        println!("[mdns] browsing...");
         // 自动发现第一个 peer
         mdns::browse_first_peer(&mdns, device_id.clone(), move |addr, peer_id| {
             println!("[mdns] found peer {} ({})", addr, peer_id);
             let _ = cmd_tx.send(SenderCmd::SetPeer(addr));
         })?;
+        println!("[mdns] browse thread spawned");
     }
 
     // 主线程不退出

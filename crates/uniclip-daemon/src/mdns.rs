@@ -31,8 +31,14 @@ pub fn advertise(
 ) -> Result<()> {
     // instance_name 必须在局域网内尽量唯一
     let inst = format!("{}-{}", device_name, &device_id[..device_id.len().min(8)]);
-    let host = "uniclip.local."; // MVP：写死也能工作（mdns-sd 会处理）
-    let ip = IpAddr::from([0, 0, 0, 0]); // 让系统选择；有些版本会忽略这个值
+    let hn = hostname::get()
+        .map_err(|e| anyhow!("hostname get: {}", e))?
+        .to_string_lossy()
+        .to_string();
+    let host = format!("{}.local.", hn);
+    // 取本机 IPv4
+    let ip = local_ip_address::local_ip()
+        .map_err(|e| anyhow!("local_ip: {}", e))?;
 
     let mut props = HashMap::new();
     props.insert("device_id".to_string(), device_id.to_string());
@@ -41,7 +47,7 @@ pub fn advertise(
     let service_info = ServiceInfo::new(
         SERVICE_TYPE,
         &inst,
-        host,
+        &host,
         ip,
         listen_port,
         props,
@@ -68,11 +74,28 @@ where
     std::thread::spawn(move || {
         for event in receiver {
             match event {
+                ServiceEvent::ServiceFound(ty, fullname) => {
+                    println!("[mdns] found: ty={} name={}", ty, fullname);
+                }
                 ServiceEvent::ServiceResolved(info) => {
+                    println!(
+                        "[mdns] resolved: fullname={} port={} addrs={:?} props={:?}",
+                        info.get_fullname(),
+                        info.get_port(),
+                        info.get_addresses(),
+                        info.get_properties()
+                    );
                     // 从 TXT 里读 device_id
                     let peer_id = info
                         .get_property("device_id")
                         .map(|s| s.to_string())
+                        .and_then(|s| {
+                            // 把 "device_id=xxxx" 变成 "xxxx"
+                            if let Some((k, v)) = s.split_once('=') {
+                                if k == "device_id" { return Some(v.to_string()); }
+                            }
+                            Some(s)
+                        })
                         .unwrap_or_default();
 
                     if peer_id.is_empty() || peer_id == self_device_id {
@@ -87,8 +110,12 @@ where
                     let addr = format!("{}:{}", ip, port);
                     on_peer(addr, peer_id);
 
-                    // “单 peer”策略：找到第一个就不再继续（你要多 peer 时再改）
+                    // “单 peer”策略：找到第一个就不再继续
+                    //TODO: multiple peer connection
                     break;
+                }
+                ServiceEvent::ServiceRemoved(ty, fullname) => {
+                    println!("[mdns] removed: ty={} name={}", ty, fullname);
                 }
                 _ => {}
             }
