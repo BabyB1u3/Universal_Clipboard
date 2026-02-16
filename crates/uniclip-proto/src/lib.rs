@@ -19,8 +19,10 @@ pub enum ClipboardPayload {
 /// 一条剪贴板内容 / 消息体
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardItem {
+    /// 每次 copy 都唯一：用于网络去重、防重复转发
+    pub event_id: String,
     /// 内容哈希（blake3 hex），用于去重/防回环
-    pub id: String,
+    pub content_hash: String,
     /// 来源设备
     pub from_device_id: String,
     /// 毫秒时间戳（Unix epoch ms）
@@ -40,4 +42,12 @@ pub enum WireMessage {
     ClipboardPush {
         item: ClipboardItem,
     },
+}
+
+pub fn encode(msg: &WireMessage) -> Result<Vec<u8>, bincode::Error> {
+    bincode::serialize(msg)
+}
+
+pub fn decode(bytes: &[u8]) -> Result<WireMessage, bincode::Error> {
+    bincode::deserialize(bytes)
 }
