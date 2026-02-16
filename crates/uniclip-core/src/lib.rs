@@ -1,0 +1,1 @@
+pub fn core_hello() -> &'static str { "hello from core" }

@@ -1,0 +1,9 @@
+[package]
+name = "uniclip-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uniclip-core = { path = "../uniclip-core" }
+uniclip-proto = { path = "../uniclip-proto" }
+uniclip-crypto = { path = "../uniclip-crypto" }
