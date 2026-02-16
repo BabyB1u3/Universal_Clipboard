@@ -4,9 +4,9 @@ use std::net::TcpStream;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::sync::mpsc::RecvTimeoutError;
 
 use crate::net;
-use std::sync::mpsc::RecvTimeoutError;
 
 #[derive(Debug)]
 enum PeerCmd {
@@ -146,8 +146,15 @@ fn peer_worker_loop(
                 }
                 pending.push_back(payload);
             }
-            Ok(PeerCmd::Shutdown) | Err(_) => {
+            Ok(PeerCmd::Shutdown) => {
                 println!("[peer:{}] shutdown", peer_id);
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+            // 没有新命令：继续往下走，尝试重连/flush
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                println!("[peer:{}] channel closed", peer_id);
                 break;
             }
         }
