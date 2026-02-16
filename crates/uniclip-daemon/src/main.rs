@@ -1,5 +1,6 @@
 mod clipboard;
 mod net;
+mod config;
 
 use anyhow::{anyhow, Result};
 use clipboard::{ArboardClipboard, ClipboardBackend};
@@ -13,11 +14,6 @@ fn now_ms() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
-}
-
-fn device_id_mvp() -> &'static str {
-    //TODO: 持久化 UUID
-    "dev-local-1"
 }
 
 /// 共享状态：listener 和 watcher 都要访问
@@ -107,26 +103,30 @@ fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>) -> std::thr
 fn start_sender(
     peer_addr: String,
     rx: mpsc::Receiver<Vec<u8>>,
+    device_id: String,
+    device_name: String,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         println!("[sender] target={}", peer_addr);
 
         let mut stream: Option<TcpStream> = None;
 
-        fn ensure_connected(peer_addr: &str, stream: &mut Option<TcpStream>) -> Result<()> {
-            if stream.is_some() {
-                return Ok(());
-            }
+        fn ensure_connected(
+            peer_addr: &str,
+            stream: &mut Option<TcpStream>,
+            device_id: &str,
+            device_name: &str,
+        ) -> Result<()> {
+            if stream.is_some() { return Ok(()); }
 
             let mut s = TcpStream::connect(peer_addr)?;
             s.set_nodelay(true).ok();
 
-            // 连接建立后发 hello
             let hello = uniclip_proto::WireMessage::Hello {
                 version: uniclip_proto::PROTOCOL_VERSION,
                 device: uniclip_proto::DeviceInfo {
-                    device_id: device_id_mvp().to_string(),
-                    device_name: "uniclip-daemon".to_string(),
+                    device_id: device_id.to_string(),
+                    device_name: device_name.to_string(),
                 },
             };
             let bytes = uniclip_proto::encode(&hello)?;
@@ -139,7 +139,7 @@ fn start_sender(
 
         while let Ok(payload) = rx.recv() {
             // 确保连接存在
-            if let Err(e) = ensure_connected(&peer_addr, &mut stream) {
+            if let Err(e) = ensure_connected(&peer_addr, &mut stream, &device_id, &device_name) {
                 println!("[sender] {} (retry in 1s)", e);
                 std::thread::sleep(Duration::from_secs(1));
                 //TODO: 做本地队列重发
@@ -164,6 +164,7 @@ fn start_sender(
 fn start_watcher(
     shared: Arc<Mutex<SharedState>>,
     tx: mpsc::Sender<Vec<u8>>,
+    device_id: String,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         println!("[watcher] polling clipboard text...");
@@ -174,7 +175,7 @@ fn start_watcher(
         loop {
             if let Ok(Some(text)) = cb.get_text() {
                 // 构造 item（会生成新 event_id + 稳定 content_hash）
-                let item = uniclip_core::make_text_item(device_id_mvp(), now_ms(), text);
+                let item = uniclip_core::make_text_item(&device_id, now_ms(), text);
 
                 // 轮询去抖：内容没变就不处理
                 if last_seen_hash.as_deref() == Some(&item.content_hash) {
@@ -229,6 +230,18 @@ fn main() -> Result<()> {
     let listen_port: u16 = args[2].parse().map_err(|_| anyhow!("invalid listen_port"))?;
     let peer_addr = args[3].clone();
 
+    let app = config::init_or_create(listen_port)?;
+    println!("[config] dir={}", app.dir.display());
+    println!("[config] device_id={}", app.config.device_id);
+    println!("[config] device_name={}", app.config.device_name);
+    println!("[config] pubkey_b64={}", app.identity.public_key_b64());
+    println!("[config] config_path={}", app.config_path.display());
+    println!("[config] key_path={}", app.key_path.display());
+
+
+    let device_id = app.config.device_id.clone();
+    let device_name = app.config.device_name.clone();
+
     let shared = Arc::new(Mutex::new(SharedState {
         rx_event_recent: uniclip_core::RecentSet::new(8192, Duration::from_secs(180)),
         suppress_content_recent: uniclip_core::RecentSet::new(2048, Duration::from_secs(2)),
@@ -237,8 +250,8 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
     let _t_listener = start_listener(listen_port, shared.clone());
-    let _t_sender = start_sender(peer_addr, rx);
-    let _t_watcher = start_watcher(shared.clone(), tx);
+    let _t_sender = start_sender(peer_addr, rx, device_id.clone(), device_name.clone());
+    let _t_watcher = start_watcher(shared.clone(), tx, device_id.clone());
 
     // 主线程不退出
     loop {

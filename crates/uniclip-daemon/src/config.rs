@@ -1,0 +1,91 @@
+use anyhow::{anyhow, Result};
+use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub device_id: String,
+    pub device_name: String,
+    pub listen_port: u16,
+
+    //TODO: paired_peers / trusted_keys / mdns
+}
+
+pub struct AppState {
+    pub dir: PathBuf,         // 配置目录
+    pub config_path: PathBuf, // config.json
+    pub key_path: PathBuf,    // identity.key（base64 seed）
+    pub config: AppConfig,
+    pub identity: uniclip_crypto::Identity,
+}
+
+/// 获取配置目录（跨平台）
+/// uniclip / daemon 作为组织名+应用名
+fn config_dir() -> Result<PathBuf> {
+    let proj = ProjectDirs::from("com", "uniclip", "uniclip")
+        .ok_or_else(|| anyhow!("cannot determine config directory"))?;
+    Ok(proj.config_dir().to_path_buf())
+}
+
+fn ensure_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let s = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&s)?)
+}
+
+fn save_json_pretty<T: Serialize>(path: &Path, v: &T) -> Result<()> {
+    let s = serde_json::to_string_pretty(v)?;
+    fs::write(path, s)?;
+    Ok(())
+}
+
+/// 初始化：加载 config + identity；不存在则创建
+pub fn init_or_create(default_listen_port: u16) -> Result<AppState> {
+    let dir = config_dir()?;
+    ensure_dir(&dir)?;
+
+    let config_path = dir.join("config.json");
+    let key_path = dir.join("identity.key");
+
+    // 1) identity：优先加载，否则生成并保存
+    let identity = if key_path.exists() {
+        uniclip_crypto::Identity::load_from_file(&key_path)?
+    } else {
+        let id = uniclip_crypto::Identity::generate();
+        id.save_to_file(&key_path)?;
+        id
+    };
+
+    // 2) config：优先加载，否则创建并保存
+    let config: AppConfig = if config_path.exists() {
+        load_json(&config_path)?
+    } else {
+        let cfg = AppConfig {
+            device_id: uuid::Uuid::new_v4().to_string(),
+            device_name: default_device_name(),
+            listen_port: default_listen_port,
+        };
+        save_json_pretty(&config_path, &cfg)?;
+        cfg
+    };
+
+    Ok(AppState {
+        dir,
+        config_path,
+        key_path,
+        config,
+        identity,
+    })
+}
+
+/// 设备名默认值
+///TODO:获取系统名, 读取 hostname：`whoami` / `gethostname` / `sysinfo`
+fn default_device_name() -> String {
+    "uniclip-device".to_string()
+}

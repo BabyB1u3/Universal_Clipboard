@@ -10,3 +10,7 @@ uniclip-crypto = { path = "../uniclip-crypto" }
 time = "0.3"
 arboard = "3"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+uuid = { version = "1", features = ["v4"] }
