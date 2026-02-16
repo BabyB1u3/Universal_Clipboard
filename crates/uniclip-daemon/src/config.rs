@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,8 +10,9 @@ pub struct AppConfig {
     pub device_id: String,
     pub device_name: String,
     pub listen_port: u16,
-
-    //TODO: paired_peers / trusted_keys / mdns
+    
+    #[serde(default)]
+    pub trusted_peers: BTreeMap<String, String>, // peer_device_id -> peer_pubkey_b64
 }
 
 pub struct AppState {
@@ -70,6 +72,7 @@ pub fn init_or_create(default_listen_port: u16) -> Result<AppState> {
             device_id: uuid::Uuid::new_v4().to_string(),
             device_name: default_device_name(),
             listen_port: default_listen_port,
+            trusted_peers: BTreeMap::new(),
         };
         save_json_pretty(&config_path, &cfg)?;
         cfg
@@ -88,4 +91,12 @@ pub fn init_or_create(default_listen_port: u16) -> Result<AppState> {
 ///TODO:获取系统名, 读取 hostname：`whoami` / `gethostname` / `sysinfo`
 fn default_device_name() -> String {
     "uniclip-device".to_string()
+}
+
+impl AppState {
+    pub fn save_config(&self) -> Result<()> {
+        let s = serde_json::to_string_pretty(&self.config)?;
+        std::fs::write(&self.config_path, s)?;
+        Ok(())
+    }
 }

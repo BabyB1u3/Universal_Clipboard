@@ -11,12 +11,20 @@ use std::net::{TcpListener};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use peers::PeerManager;
+use serde::{Deserialize, Serialize};
 
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PairingInfo {
+    device_id: String,
+    device_name: String,
+    pubkey_b64: String,
 }
 
 /// 共享状态：listener 和 watcher 都要访问
@@ -27,7 +35,7 @@ struct SharedState {
     suppress_content_recent: uniclip_core::RecentSet,
 }
 
-fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>) -> std::thread::JoinHandle<()> {
+fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>, trusted: Arc<std::collections::BTreeMap<String, String>>,) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let addr = format!("0.0.0.0:{}", listen_port);
         let listener = TcpListener::bind(&addr).expect("bind listen failed");
@@ -85,6 +93,10 @@ fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>) -> std::thr
                             uniclip_proto::ClipboardPayload::Text { text } => {
                                 if let Err(e) = cb.set_text(&text) {
                                     println!("[clipboard set error] {}", e);
+                                    continue;
+                                }
+                                if !trusted.contains_key(&item.from_device_id) {
+                                    println!("[DROP] untrusted from={}", item.from_device_id);
                                     continue;
                                 }
                                 println!(
@@ -156,58 +168,115 @@ fn start_watcher(
 fn usage() -> ! {
     eprintln!("Usage:");
     eprintln!("  uniclip-daemon run <listen_port> [peer_ip:peer_port]");
+    eprintln!("  uniclip-daemon show-pairing <listen_port>");
+    eprintln!("  uniclip-daemon pair <listen_port> <pairing_json>");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  Auto-discovery:");
-    eprintln!("    uniclip-daemon run 7878");
-    eprintln!("  Manual peer (debug):");
-    eprintln!("    uniclip-daemon run 7878 127.0.0.1:7879");
+    eprintln!("  A: uniclip-daemon show-pairing 7878");
+    eprintln!("  B: uniclip-daemon pair 7879 '{{\"device_id\":\"...\",\"device_name\":\"...\",\"pubkey_b64\":\"...\"}}'");
+    eprintln!("  A: uniclip-daemon pair 7878 '{{...B...}}'");
+    eprintln!("  A: uniclip-daemon run 7878");
+    eprintln!("  B: uniclip-daemon run 7879");
     std::process::exit(2);
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    if (args.len() != 3 && args.len() != 4) || args[1] != "run" {
+    if args.len() < 2 {
         usage();
     }
 
-    let listen_port: u16 = args[2].parse().map_err(|_| anyhow!("invalid listen_port"))?;
-    let manual_peer: Option<String> = if args.len() >= 4 { Some(args[3].clone()) } else { None };
+    let cmd = args[1].as_str();
 
-    let app = config::init_or_create(listen_port)?;
-    println!("[config] device_id={}", app.config.device_id);
-    println!("[config] device_name={}", app.config.device_name);
-    println!("[config] pubkey_b64={}", app.identity.public_key_b64());
-    
-    let device_id = app.config.device_id.clone();
-    let device_name = app.config.device_name.clone();
+    match cmd {
+        "show-pairing" => {
+            if args.len() != 3 {
+                usage();
+            }
+            let listen_port: u16 = args[2].parse().map_err(|_| anyhow!("invalid listen_port"))?;
+            let app = config::init_or_create(listen_port)?;
 
-    let peer_mgr = Arc::new(PeerManager::new(device_id.clone(), device_name.clone()));
+            let info = PairingInfo {
+                device_id: app.config.device_id.clone(),
+                device_name: app.config.device_name.clone(),
+                pubkey_b64: app.identity.public_key_b64(),
+            };
 
-    let shared = Arc::new(Mutex::new(SharedState {
-        rx_event_recent: uniclip_core::RecentSet::new(8192, Duration::from_secs(180)),
-        suppress_content_recent: uniclip_core::RecentSet::new(2048, Duration::from_secs(2)),
-    }));
-
-    let _t_listener = start_listener(listen_port, shared.clone());
-    let _t_watcher = start_watcher(shared.clone(), peer_mgr.clone(), device_id.clone());
-
-    let mdns = mdns_sd::ServiceDaemon::new()?;
-    mdns::advertise(&mdns, &device_id, &device_name, listen_port)?;
-
-    if let Some(addr) = manual_peer {
-        // 手动指定 peer
-        peer_mgr.add_or_update_peer("manual-peer", addr);
-    } else {
-        let pm = peer_mgr.clone();
-        mdns::browse_peers(&mdns, device_id.clone(), move |addr, peer_id| {
-            println!("[mdns] resolved: peer_id={} addr={}", peer_id, addr);
-            pm.add_or_update_peer(&peer_id, addr);
-        })?;
+            let s = serde_json::to_string(&info)?; // 一行 JSON，方便复制
+            println!("{}", s);
+            return Ok(());
         }
 
-    // 主线程不退出
-    loop {
-        std::thread::sleep(Duration::from_secs(3600));
+        "pair" => {
+            if args.len() != 4 {
+                usage();
+            }
+            let listen_port: u16 = args[2].parse().map_err(|_| anyhow!("invalid listen_port"))?;
+            let pairing_json = &args[3];
+
+            let mut app = config::init_or_create(listen_port)?;
+            let info: PairingInfo = serde_json::from_str(pairing_json)
+                .map_err(|e| anyhow!("invalid pairing json: {}", e))?;
+
+            // 写入 trusted_peers：device_id -> pubkey_b64
+            app.config.trusted_peers.insert(info.device_id.clone(), info.pubkey_b64.clone());
+            app.save_config()?;
+
+            println!(
+                "[paired] added device_id={} name={}",
+                info.device_id, info.device_name
+            );
+            return Ok(());
+        }
+
+        "run" => {
+            let listen_port: u16 = args[2].parse().map_err(|_| anyhow!("invalid listen_port"))?;
+            let manual_peer: Option<String> = if args.len() >= 4 { Some(args[3].clone()) } else { None };
+
+            let app = config::init_or_create(listen_port)?;
+            println!("[config] device_id={}", app.config.device_id);
+            println!("[config] device_name={}", app.config.device_name);
+            println!("[config] pubkey_b64={}", app.identity.public_key_b64());
+            
+            let device_id = app.config.device_id.clone();
+            let device_name = app.config.device_name.clone();
+
+            let peer_mgr = Arc::new(PeerManager::new(device_id.clone(), device_name.clone()));
+
+            let shared = Arc::new(Mutex::new(SharedState {
+                rx_event_recent: uniclip_core::RecentSet::new(8192, Duration::from_secs(180)),
+                suppress_content_recent: uniclip_core::RecentSet::new(2048, Duration::from_secs(2)),
+            }));
+
+            let trusted = Arc::new(app.config.trusted_peers.clone());
+            let _t_listener = start_listener(listen_port, shared.clone(), trusted.clone());
+            let _t_watcher = start_watcher(shared.clone(), peer_mgr.clone(), device_id.clone());
+
+            let mdns = mdns_sd::ServiceDaemon::new()?;
+            mdns::advertise(&mdns, &device_id, &device_name, listen_port)?;
+
+            if let Some(addr) = manual_peer {
+                // 手动指定 peer
+                peer_mgr.add_or_update_peer("manual-peer", addr);
+            } else {
+                let trusted = app.config.trusted_peers.clone();
+                let pm = peer_mgr.clone();
+                mdns::browse_peers(&mdns, device_id.clone(), move |addr, peer_id| {
+                    if !trusted.contains_key(&peer_id) {
+                        // 未配对：忽略（后面可以打印一句提示）
+                        return;
+                    }
+                    println!("[mdns] trusted peer_id={} addr={}", peer_id, addr);
+                    pm.add_or_update_peer(&peer_id, addr);
+                })?;
+                }
+
+            // 主线程不退出
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+
+        _ => usage(),
     }
 }
