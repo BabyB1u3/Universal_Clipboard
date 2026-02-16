@@ -7,3 +7,4 @@ edition = "2024"
 uniclip-core = { path = "../uniclip-core" }
 uniclip-proto = { path = "../uniclip-proto" }
 uniclip-crypto = { path = "../uniclip-crypto" }
+time = "0.3"
