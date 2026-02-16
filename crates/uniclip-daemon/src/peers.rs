@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::net;
+use std::sync::mpsc::RecvTimeoutError;
 
 #[derive(Debug)]
 enum PeerCmd {
@@ -130,8 +131,8 @@ fn peer_worker_loop(
     }
 
     loop {
-        // 1) 尽量接收命令（阻塞式，简单可靠）
-        match rx.recv() {
+        // 1) 尝试收命令，但不要永远阻塞
+        match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(PeerCmd::UpdateAddr(addr)) => {
                 if peer_addr.as_deref() != Some(addr.as_str()) {
                     println!("[peer:{}] addr update {}", peer_id, addr);
@@ -151,7 +152,12 @@ fn peer_worker_loop(
             }
         }
 
-        // 2) flush pending
+        // 2) 没有待发消息，就别白连
+        if pending.is_empty() {
+            continue;
+        }
+
+        // 3) flush pending
         let Some(addr) = peer_addr.clone() else {
             continue;
         };
