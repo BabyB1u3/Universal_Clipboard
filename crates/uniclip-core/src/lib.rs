@@ -34,6 +34,12 @@ impl RecentSet {
         Self { ttl, cache: LruCache::new(cap) }
     }
 
+    /// 只检查是否还在 TTL 内，不刷新时间戳
+    pub fn contains_fresh(&mut self, key: &str) -> bool {
+        self.evict_expired();
+        self.cache.contains(key)
+    }
+
     pub fn check_and_remember(&mut self, key: &str) -> bool {
         self.evict_expired();
         if self.cache.contains(key) {
