@@ -96,10 +96,13 @@ pub fn init_or_create(default_listen_port: u16) -> Result<AppState> {
     })
 }
 
-/// 设备名默认值
-///TODO:获取系统名, 读取 hostname：`whoami` / `gethostname` / `sysinfo`
+/// 设备名
 fn default_device_name() -> String {
-    "uniclip-device".to_string()
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "uniclip-device".to_string())
 }
 
 impl AppState {
