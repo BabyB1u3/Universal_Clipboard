@@ -5,7 +5,7 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInfo {
-    pub device_id: String,     //TODO: 换为UUID
+    pub device_id: String,
     pub device_name: String,   // "Mian's MacBook" / "RaspberryPi" 之类
 }
 

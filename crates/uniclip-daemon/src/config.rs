@@ -6,13 +6,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerRecord {
+    pub device_name: String,
+    pub pubkey_b64: String,
+
+    #[serde(default)]
+    pub added_at_ms: u64, // 可选：以后 UI 排序/显示“何时配对”
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub device_id: String,
     pub device_name: String,
     pub listen_port: u16,
     
     #[serde(default)]
-    pub trusted_peers: BTreeMap<String, String>, // peer_device_id -> peer_pubkey_b64
+    pub trusted_peers: BTreeMap<String, PeerRecord>, // peer_device_id -> peer_pubkey_b64
 }
 
 pub struct AppState {

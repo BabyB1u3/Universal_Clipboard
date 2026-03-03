@@ -11,6 +11,7 @@ use std::net::{TcpListener};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use peers::PeerManager;
+use config::PeerRecord;
 use serde::{Deserialize, Serialize};
 
 fn now_ms() -> u64 {
@@ -35,7 +36,7 @@ struct SharedState {
     suppress_content_recent: uniclip_core::RecentSet,
 }
 
-fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>, trusted: Arc<std::collections::BTreeMap<String, String>>,) -> std::thread::JoinHandle<()> {
+fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>, trusted: Arc<std::collections::BTreeMap<String, PeerRecord>>,) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let addr = format!("0.0.0.0:{}", listen_port);
         let listener = TcpListener::bind(&addr).expect("bind listen failed");
@@ -73,6 +74,10 @@ fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>, trusted: Ar
 
                 match msg {
                     uniclip_proto::WireMessage::ClipboardPush { item } => {
+                        if !trusted.contains_key(&item.from_device_id) {
+                            println!("[DROP] untrusted from={}", item.from_device_id);
+                            continue;
+                        }
                         // --- 1) event_id 去重（网络层去重）---
                         let should_apply = {
                             let mut st = shared.lock().unwrap();
@@ -93,10 +98,6 @@ fn start_listener(listen_port: u16, shared: Arc<Mutex<SharedState>>, trusted: Ar
                             uniclip_proto::ClipboardPayload::Text { text } => {
                                 if let Err(e) = cb.set_text(&text) {
                                     println!("[clipboard set error] {}", e);
-                                    continue;
-                                }
-                                if !trusted.contains_key(&item.from_device_id) {
-                                    println!("[DROP] untrusted from={}", item.from_device_id);
                                     continue;
                                 }
                                 println!(
@@ -218,8 +219,20 @@ fn main() -> Result<()> {
             let info: PairingInfo = serde_json::from_str(pairing_json)
                 .map_err(|e| anyhow!("invalid pairing json: {}", e))?;
 
-            // 写入 trusted_peers：device_id -> pubkey_b64
-            app.config.trusted_peers.insert(info.device_id.clone(), info.pubkey_b64.clone());
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
+            // 写入 trusted_peers
+            app.config.trusted_peers.insert(
+                info.device_id.clone(),
+                config::PeerRecord {
+                    device_name: info.device_name.clone(),
+                    pubkey_b64: info.pubkey_b64.clone(),
+                    added_at_ms: now_ms,
+                },
+            );
             app.save_config()?;
 
             println!(
