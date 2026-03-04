@@ -68,18 +68,13 @@ impl PeerManager {
     /// 广播 payload 给所有 peer（由 watcher 调用）
     pub fn broadcast(&self, payload: Vec<u8>) {
         let map = self.inner.lock().unwrap();
+        println!("[peers] broadcast to {} peers", map.len());
         for (peer_id, handle) in map.iter() {
             // 每个 peer 都需要一份 payload（Vec<u8>），这里 clone 是最简单 MVP
             let _ = handle.tx.send(PeerCmd::Send(payload.clone()));
-            // 你也可以在以后用 Arc<[u8]> 来避免 clone
+            // 也可以在以后用 Arc<[u8]> 来避免 clone
             let _ = peer_id;
         }
-    }
-
-    /// 可选：用于调试
-    #[allow(dead_code)]
-    pub fn count(&self) -> usize {
-        self.inner.lock().unwrap().len()
     }
 }
 

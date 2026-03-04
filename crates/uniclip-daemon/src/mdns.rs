@@ -55,6 +55,7 @@ pub fn advertise(
 
     daemon.register(service_info)
         .map_err(|e| anyhow!("mdns register: {}", e))?;
+    println!("[mdns] advertised {} on {} {}:{}", SERVICE_TYPE, host, ip, listen_port);
     Ok(())
 }
 
@@ -71,6 +72,7 @@ where
         .map_err(|e| anyhow!("mdns browse: {}", e))?;
 
     std::thread::spawn(move || {
+        println!("[mdns] browse thread started for {}", SERVICE_TYPE);
         for event in receiver {
             match event {
                 ServiceEvent::ServiceFound(ty, fullname) => {
@@ -100,6 +102,7 @@ where
                     let Some(ip) = ip else { continue; };
 
                     let addr = format!("{}:{}", ip, port);
+
                     on_peer(addr, peer_id);
                 }
                 ServiceEvent::ServiceRemoved(ty, fullname) => {

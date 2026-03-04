@@ -139,6 +139,8 @@ fn start_watcher(
                 }
                 last_seen_hash = Some(item.content_hash.clone());
 
+                println!("[watcher] new content_hash={} (will broadcast)", item.content_hash);
+
                 // 抑制回环：如果这个 hash 是刚从网络写入的，就跳过一次（短 TTL）
                 let suppressed = {
                     let mut st = shared.lock().unwrap();
@@ -247,6 +249,7 @@ fn main() -> Result<()> {
             let manual_peer: Option<String> = if args.len() >= 4 { Some(args[3].clone()) } else { None };
 
             let app = config::init_or_create(listen_port)?;
+            println!("[config] dir={}", app.dir.display());
             println!("[config] device_id={}", app.config.device_id);
             println!("[config] device_name={}", app.config.device_name);
             println!("[config] pubkey_b64={}", app.identity.public_key_b64());
@@ -276,7 +279,8 @@ fn main() -> Result<()> {
                 let pm = peer_mgr.clone();
                 mdns::browse_peers(&mdns, device_id.clone(), move |addr, peer_id| {
                     if !trusted.contains_key(&peer_id) {
-                        // 未配对：忽略（后面可以打印一句提示）
+                        println!("[mdns] discovered UNTRUSTED peer_id={} addr={} (ignored)", peer_id, addr);
+                        println!("[mdns] trusted keys: {:?}", trusted.keys().collect::<Vec<_>>());
                         return;
                     }
                     println!("[mdns] trusted peer_id={} addr={}", peer_id, addr);
