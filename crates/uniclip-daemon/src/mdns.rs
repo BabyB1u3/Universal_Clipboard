@@ -1,25 +1,25 @@
 use anyhow::{anyhow, Result};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo, ScopedIp};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::collections::{HashSet};
 
 pub const SERVICE_TYPE: &str = "_uniclip._tcp.local.";
 
-fn pick_ip(addrs: impl Iterator<Item = IpAddr>) -> Option<IpAddr> {
-    // 优先选 IPv4 且非 loopback
-    let mut v4 = None;
-    let mut other = None;
-    for ip in addrs {
-        if ip.is_loopback() {
-            continue;
-        }
-        if ip.is_ipv4() && v4.is_none() {
-            v4 = Some(ip);
-        } else if other.is_none() {
-            other = Some(ip);
+fn pick_ip_scoped(addresses: &HashSet<ScopedIp>) -> Option<IpAddr> {
+    // 优先 IPv4 非 loopback
+    for s in addresses.iter() {
+        if s.is_ipv4() && !s.is_loopback() {
+            return Some(s.to_ip_addr());
         }
     }
-    v4.or(other)
+    // 退而求其次：任何非 loopback
+    for s in addresses.iter() {
+        if !s.is_loopback() {
+            return Some(s.to_ip_addr());
+        }
+    }
+    None
 }
 
 /// 广播本机服务（mDNS advertise）
@@ -66,14 +66,16 @@ pub fn browse_peers<F>(
     mut on_peer: F,
 ) -> Result<()>
 where
-    F: FnMut(String, String) + Send + 'static,
+    F: FnMut(String /*addr*/, String /*peer_id*/) + Send + 'static,
 {
-    let receiver = daemon.browse(SERVICE_TYPE)
+    let receiver = daemon
+        .browse(SERVICE_TYPE)
         .map_err(|e| anyhow!("mdns browse: {}", e))?;
 
     std::thread::spawn(move || {
         println!("[mdns] browse thread started for {}", SERVICE_TYPE);
-        for event in receiver {
+
+        while let Ok(event) = receiver.recv() {
             match event {
                 ServiceEvent::ServiceFound(ty, fullname) => {
                     println!("[mdns] found: type={} name={}", ty, fullname);
@@ -98,7 +100,7 @@ where
 
                     // 取 IP + port
                     let port = info.get_port();
-                    let ip = pick_ip(info.get_addresses().iter().copied());
+                    let ip = pick_ip_scoped(&info.addresses);
                     let Some(ip) = ip else { continue; };
 
                     let addr = format!("{}:{}", ip, port);
