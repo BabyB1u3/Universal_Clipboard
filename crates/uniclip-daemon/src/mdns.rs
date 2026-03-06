@@ -22,6 +22,21 @@ fn pick_ip_scoped(addresses: &HashSet<ScopedIp>) -> Option<IpAddr> {
     None
 }
 
+fn make_local_server(device_name: &str) -> String {
+    let mut n = device_name.trim().to_string();
+    if n.is_empty() {
+        n = "device".to_string();
+    }
+    // avoid user giving "xxx.local" or "xxx.local."
+    if n.ends_with(".local.") {
+        n
+    } else if n.ends_with(".local") {
+        format!("{}.", n)
+    } else {
+        format!("{}.local.", n)
+    }
+}
+
 /// 广播本机服务（mDNS advertise）
 pub fn advertise(
     daemon: &ServiceDaemon,
@@ -31,11 +46,9 @@ pub fn advertise(
 ) -> Result<()> {
     // instance_name 必须在局域网内尽量唯一
     let inst = format!("{}-{}", device_name, &device_id[..device_id.len().min(8)]);
-    let hn = hostname::get()
-        .map_err(|e| anyhow!("hostname get: {}", e))?
-        .to_string_lossy()
-        .to_string();
-    let host = format!("{}.local.", hn);
+    
+    let host = make_local_server(&device_name);
+
     // 取本机 IPv4
     let ip = local_ip_address::local_ip()
         .map_err(|e| anyhow!("local_ip: {}", e))?;
