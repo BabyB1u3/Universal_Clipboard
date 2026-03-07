@@ -2,7 +2,25 @@
 resolver = "2"
 members = [
     "crates/uniclip-core",
-    "crates/uniclip-proto",
     "crates/uniclip-crypto",
+    "crates/uniclip-proto",
+    "crates/uniclip-store",
+    "crates/uniclip-discovery",
+    "crates/uniclip-transport",
     "crates/uniclip-daemon",
+    "crates/uniclip-api",
 ]
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+directories = "5"
+hostname = "0.4"
+mdns-sd = "0.18"
+local-ip-address = "0.6"
+arboard = "3"

@@ -112,7 +112,7 @@ fn peer_worker_loop(
         // 连接建立后发 hello（后面做认证握手时会替换/增强）
         let hello = uniclip_proto::WireMessage::Hello {
             version: uniclip_proto::PROTOCOL_VERSION,
-            device: uniclip_proto::DeviceInfo {
+            device: uniclip_core::DeviceInfo {
                 device_id: device_id.to_string(),
                 device_name: device_name.to_string(),
             },

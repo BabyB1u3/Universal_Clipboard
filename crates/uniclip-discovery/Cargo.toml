@@ -1,0 +1,9 @@
+[package]
+name = "uniclip-discovery"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+mdns-sd.workspace = true
+local-ip-address.workspace = true

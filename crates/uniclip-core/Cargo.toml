@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-blake3 = "1"
-lru = "0.12"
-uuid = { version = "1", features = ["v4"] }
-uniclip-proto = { path = "../uniclip-proto" }
+uuid.workspace = true
+serde.workspace = true
 
+lru = "0.12"
+blake3 = "1"
