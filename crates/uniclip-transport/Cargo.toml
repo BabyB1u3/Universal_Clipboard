@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+serde.workspace = true
 
 uniclip-core = { path = "../uniclip-core" }
 uniclip-proto = { path = "../uniclip-proto" }

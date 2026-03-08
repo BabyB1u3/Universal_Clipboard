@@ -220,6 +220,15 @@ fn cmd_run(listen_port: u16, manual_peer: Option<String>) -> Result<()> {
 
     let peer_mgr = Arc::new(PeerManager::new(device_id.clone(), device_name.clone()));
 
+    let pm_debug = peer_mgr.clone();
+    std::thread::spawn(move || loop {
+        let sessions = pm_debug.list_sessions();
+        if !sessions.is_empty() {
+            println!("[sessions] {:?}", sessions);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    });
+
     let shared = Arc::new(Mutex::new(SharedState {
         rx_event_recent: RecentSet::new(8192, Duration::from_secs(180)),
         suppress_content_recent: RecentSet::new(2048, Duration::from_secs(2)),

@@ -1,12 +1,13 @@
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
 use std::net::TcpStream;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::sync::mpsc::RecvTimeoutError;
 
 use crate::net;
+use crate::session::{PeerSessionSnapshot, SessionState};
 
 #[derive(Debug)]
 enum PeerCmd {
@@ -17,6 +18,8 @@ enum PeerCmd {
 
 struct PeerHandle {
     tx: mpsc::Sender<PeerCmd>,
+    state: Arc<Mutex<SessionState>>,
+    addr: Arc<Mutex<Option<String>>>,
 }
 
 /// 多 peer 管理器：
@@ -47,6 +50,10 @@ impl PeerManager {
         let mut map = self.inner.lock().unwrap();
 
         if let Some(handle) = map.get(peer_id) {
+            {
+                let mut addr_slot = handle.addr.lock().unwrap();
+                *addr_slot = Some(addr.clone());
+            }
             let _ = handle.tx.send(PeerCmd::UpdateAddr(addr));
             return;
         }
@@ -58,23 +65,74 @@ impl PeerManager {
         let dname = self.device_name.clone();
         let pid = peer_id.to_string();
 
+        let state = Arc::new(Mutex::new(SessionState::Disconnected));
+        let state_for_worker = state.clone();
+
+        let current_addr = Arc::new(Mutex::new(Some(addr.clone())));
+        let addr_for_worker = current_addr.clone();
+
         thread::spawn(move || {
-            peer_worker_loop(pid, rx, did, dname, addr);
+            peer_worker_loop(
+                pid,
+                rx,
+                did,
+                dname,
+                addr,
+                state_for_worker,
+                addr_for_worker,
+            );
         });
 
-        map.insert(peer_id.to_string(), PeerHandle { tx });
+        map.insert(
+            peer_id.to_string(),
+            PeerHandle {
+                tx,
+                state,
+                addr: current_addr,
+            },
+        );
     }
 
     /// 广播 payload 给所有 peer（由 watcher 调用）
     pub fn broadcast(&self, payload: Vec<u8>) {
         let map = self.inner.lock().unwrap();
         println!("[peers] broadcast to {} peers", map.len());
-        for (peer_id, handle) in map.iter() {
-            // 每个 peer 都需要一份 payload（Vec<u8>），这里 clone 是最简单 MVP
+        for (_peer_id, handle) in map.iter() {
             let _ = handle.tx.send(PeerCmd::Send(payload.clone()));
-            // 也可以在以后用 Arc<[u8]> 来避免 clone
-            let _ = peer_id;
         }
+    }
+
+    pub fn session_state(&self, peer_id: &str) -> Option<SessionState> {
+        let map = self.inner.lock().unwrap();
+        let handle = map.get(peer_id)?;
+        Some(*handle.state.lock().unwrap())
+    }
+
+    pub fn list_sessions(&self) -> Vec<PeerSessionSnapshot> {
+        let map = self.inner.lock().unwrap();
+
+        map.iter()
+            .map(|(peer_id, handle)| PeerSessionSnapshot {
+                peer_id: peer_id.clone(),
+                addr: handle.addr.lock().unwrap().clone(),
+                state: *handle.state.lock().unwrap(),
+            })
+            .collect()
+    }
+
+    pub fn shutdown_all(&self) {
+        let map = self.inner.lock().unwrap();
+        for (_peer_id, handle) in map.iter() {
+            let _ = handle.tx.send(PeerCmd::Shutdown);
+        }
+    }
+}
+
+fn set_state(peer_id: &str, state: &Arc<Mutex<SessionState>>, new_state: SessionState) {
+    let mut s = state.lock().unwrap();
+    if *s != new_state {
+        println!("[peer:{}] state -> {:?}", peer_id, new_state);
+        *s = new_state;
     }
 }
 
@@ -88,6 +146,8 @@ fn peer_worker_loop(
     device_id: String,
     device_name: String,
     initial_addr: String,
+    state: Arc<Mutex<SessionState>>,
+    shared_addr: Arc<Mutex<Option<String>>>,
 ) {
     let mut peer_addr: Option<String> = Some(initial_addr);
     let mut stream: Option<TcpStream> = None;
@@ -101,10 +161,13 @@ fn peer_worker_loop(
         stream: &mut Option<TcpStream>,
         device_id: &str,
         device_name: &str,
+        state: &Arc<Mutex<SessionState>>,
     ) -> Result<()> {
         if stream.is_some() {
             return Ok(());
         }
+
+        set_state(peer_id, state, SessionState::Connecting);
 
         let mut s = TcpStream::connect(peer_addr)?;
         s.set_nodelay(true).ok();
@@ -122,6 +185,7 @@ fn peer_worker_loop(
 
         println!("[peer:{}] connected {}", peer_id, peer_addr);
         *stream = Some(s);
+        set_state(peer_id, state, SessionState::Connected);
         Ok(())
     }
 
@@ -131,8 +195,13 @@ fn peer_worker_loop(
             Ok(PeerCmd::UpdateAddr(addr)) => {
                 if peer_addr.as_deref() != Some(addr.as_str()) {
                     println!("[peer:{}] addr update {}", peer_id, addr);
-                    peer_addr = Some(addr);
+                    peer_addr = Some(addr.clone());
+                    {
+                        let mut slot = shared_addr.lock().unwrap();
+                        *slot = Some(addr);
+                    }
                     stream = None; // 强制重连到新地址
+                    set_state(&peer_id, &state, SessionState::Disconnected);
                 }
             }
             Ok(PeerCmd::Send(payload)) => {
@@ -143,13 +212,15 @@ fn peer_worker_loop(
             }
             Ok(PeerCmd::Shutdown) => {
                 println!("[peer:{}] shutdown", peer_id);
+                set_state(&peer_id, &state, SessionState::Disconnected);
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-            // 没有新命令：继续往下走，尝试重连/flush
+                // 没有新命令：继续往下走，尝试重连/flush
             }
             Err(RecvTimeoutError::Disconnected) => {
                 println!("[peer:{}] channel closed", peer_id);
+                set_state(&peer_id, &state, SessionState::Disconnected);
                 break;
             }
         }
@@ -161,12 +232,22 @@ fn peer_worker_loop(
 
         // 3) flush pending
         let Some(addr) = peer_addr.clone() else {
+            set_state(&peer_id, &state, SessionState::Disconnected);
             continue;
         };
 
-        if let Err(e) = ensure_connected(&peer_id, &addr, &mut stream, &device_id, &device_name) {
+        if let Err(e) = ensure_connected(
+            &peer_id,
+            &addr,
+            &mut stream,
+            &device_id,
+            &device_name,
+            &state,
+        ) {
             println!("[peer:{}] connect fail: {} (retry 1s)", peer_id, e);
+            set_state(&peer_id, &state, SessionState::Backoff);
             thread::sleep(Duration::from_secs(1));
+            set_state(&peer_id, &state, SessionState::Disconnected);
             continue;
         }
 
@@ -175,6 +256,7 @@ fn peer_worker_loop(
                 if let Err(e) = net::send_frame(s, &payload) {
                     println!("[peer:{}] send failed: {} (drop connection)", peer_id, e);
                     stream = None;
+                    set_state(&peer_id, &state, SessionState::Disconnected);
                     pending.push_front(payload); // 放回去，重连后重发
                     break;
                 } else {
