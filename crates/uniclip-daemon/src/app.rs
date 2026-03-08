@@ -8,7 +8,7 @@ use crate::clipboard::{ArboardClipboard, ClipboardBackend};
 
 use uniclip_core::{make_text_item, ClipboardPayload, PairingInfo, RecentSet};
 use uniclip_discovery::mdns;
-use uniclip_store::{init_or_create, PeerRecord};
+use uniclip_store::{TrustStore, PeerRecord};
 use uniclip_transport::{recv_frame, PeerManager};
 
 fn now_ms() -> u64 {
@@ -185,21 +185,16 @@ fn usage() -> ! {
 }
 
 fn cmd_show_pairing(listen_port: u16) -> Result<()> {
-    let app = init_or_create(listen_port)?;
-
-    let info = PairingInfo {
-        device_id: app.config.device_id.clone(),
-        device_name: app.config.device_name.clone(),
-        pubkey_b64: app.identity.public_key_b64(),
-    };
-
+    let store = TrustStore::load(listen_port)?;
+    let info = store.pairing_info();
     let s = serde_json::to_string(&info)?;
     println!("{}", s);
     Ok(())
 }
 
 fn cmd_pair(listen_port: u16, pairing_json: &str) -> Result<()> {
-    let mut app = init_or_create(listen_port)?;
+    let mut store = TrustStore::load(listen_port)?;
+
     let info: PairingInfo =
         serde_json::from_str(pairing_json).map_err(|e| anyhow!("invalid pairing json: {}", e))?;
 
@@ -208,33 +203,28 @@ fn cmd_pair(listen_port: u16, pairing_json: &str) -> Result<()> {
         .unwrap()
         .as_millis() as u64;
 
-    // 写入 trusted_peers
-    app.config.trusted_peers.insert(
-        info.device_id.clone(),
-        PeerRecord {
-            device_name: info.device_name.clone(),
-            pubkey_b64: info.pubkey_b64.clone(),
-            added_at_ms: now_ms,
-        },
-    );
-    app.save_config()?;
+    let device_id = info.device_id.clone();
+    let device_name = info.device_name.clone();
+
+    store.add_peer(info, now_ms)?;
 
     println!(
         "[paired] added device_id={} name={}",
-        info.device_id, info.device_name
+        device_id, device_name
     );
     Ok(())
 }
 
 fn cmd_run(listen_port: u16, manual_peer: Option<String>) -> Result<()> {
-    let app = init_or_create(listen_port)?;
-    println!("[config] dir={}", app.dir.display());
-    println!("[config] device_id={}", app.config.device_id);
-    println!("[config] device_name={}", app.config.device_name);
-    println!("[config] pubkey_b64={}", app.identity.public_key_b64());
+    let store = TrustStore::load(listen_port)?;
 
-    let device_id = app.config.device_id.clone();
-    let device_name = app.config.device_name.clone();
+    println!("[config] dir={}", store.config_dir().display());
+    println!("[config] device_id={}", store.device_id());
+    println!("[config] device_name={}", store.device_name());
+    println!("[config] pubkey_b64={}", store.public_key_b64());
+
+    let device_id = store.device_id().to_string();
+    let device_name = store.device_name().to_string();
 
     let peer_mgr = Arc::new(PeerManager::new(device_id.clone(), device_name.clone()));
 
@@ -243,7 +233,7 @@ fn cmd_run(listen_port: u16, manual_peer: Option<String>) -> Result<()> {
         suppress_content_recent: RecentSet::new(2048, Duration::from_secs(2)),
     }));
 
-    let trusted = Arc::new(app.config.trusted_peers.clone());
+    let trusted = Arc::new(store.trusted_peers().clone());
     let _t_listener = start_listener(listen_port, shared.clone(), trusted.clone());
     let _t_watcher = start_watcher(shared.clone(), peer_mgr.clone(), device_id.clone());
 
@@ -254,7 +244,7 @@ fn cmd_run(listen_port: u16, manual_peer: Option<String>) -> Result<()> {
         // 手动指定 peer
         peer_mgr.add_or_update_peer("manual-peer", addr);
     } else {
-        let trusted = app.config.trusted_peers.clone();
+        let trusted = store.trusted_peers().clone();
         let pm = peer_mgr.clone();
 
         mdns::browse_peers(&mdns_daemon, device_id.clone(), move |addr, peer_id| {
