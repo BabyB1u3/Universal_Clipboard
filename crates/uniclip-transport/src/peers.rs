@@ -4,7 +4,7 @@ use std::net::TcpStream;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::net;
 use crate::session::{PeerSessionSnapshot, SessionState};
@@ -20,11 +20,15 @@ struct PeerHandle {
     tx: mpsc::Sender<PeerCmd>,
     state: Arc<Mutex<SessionState>>,
     addr: Arc<Mutex<Option<String>>>,
+    backoff_until: Arc<Mutex<Option<Instant>>>,
 }
 
 /// 多 peer 管理器：
 /// - mDNS 发现时 add_or_update_peer(peer_id, addr)
 /// - watcher 产生 payload 时 broadcast(payload)
+///
+/// 注意：当前这里暴露的是“outbound session”状态，
+/// 不是 inbound listener 的连接状态。
 pub struct PeerManager {
     inner: Arc<Mutex<HashMap<String, PeerHandle>>>,
     device_id: String,
@@ -42,7 +46,6 @@ impl PeerManager {
 
     /// 新增或更新一个 peer（由 mDNS 回调调用）
     pub fn add_or_update_peer(&self, peer_id: &str, addr: String) {
-        // 不连自己（双保险；正常 mDNS 回调处也会过滤）
         if peer_id == self.device_id {
             return;
         }
@@ -58,7 +61,6 @@ impl PeerManager {
             return;
         }
 
-        // 新 peer：起一个 worker
         let (tx, rx) = mpsc::channel::<PeerCmd>();
 
         let did = self.device_id.clone();
@@ -71,6 +73,9 @@ impl PeerManager {
         let current_addr = Arc::new(Mutex::new(Some(addr.clone())));
         let addr_for_worker = current_addr.clone();
 
+        let backoff_until = Arc::new(Mutex::new(None));
+        let backoff_for_worker = backoff_until.clone();
+
         thread::spawn(move || {
             peer_worker_loop(
                 pid,
@@ -80,6 +85,7 @@ impl PeerManager {
                 addr,
                 state_for_worker,
                 addr_for_worker,
+                backoff_for_worker,
             );
         });
 
@@ -89,11 +95,11 @@ impl PeerManager {
                 tx,
                 state,
                 addr: current_addr,
+                backoff_until,
             },
         );
     }
 
-    /// 广播 payload 给所有 peer（由 watcher 调用）
     pub fn broadcast(&self, payload: Vec<u8>) {
         let map = self.inner.lock().unwrap();
         println!("[peers] broadcast to {} peers", map.len());
@@ -110,12 +116,28 @@ impl PeerManager {
 
     pub fn list_sessions(&self) -> Vec<PeerSessionSnapshot> {
         let map = self.inner.lock().unwrap();
+        let now = Instant::now();
 
         map.iter()
-            .map(|(peer_id, handle)| PeerSessionSnapshot {
-                peer_id: peer_id.clone(),
-                addr: handle.addr.lock().unwrap().clone(),
-                state: *handle.state.lock().unwrap(),
+            .map(|(peer_id, handle)| {
+                let retry_in_ms = handle
+                    .backoff_until
+                    .lock()
+                    .unwrap()
+                    .map(|deadline| {
+                        if deadline > now {
+                            deadline.duration_since(now).as_millis() as u64
+                        } else {
+                            0
+                        }
+                    });
+
+                PeerSessionSnapshot {
+                    peer_id: peer_id.clone(),
+                    addr: handle.addr.lock().unwrap().clone(),
+                    state: *handle.state.lock().unwrap(),
+                    retry_in_ms,
+                }
             })
             .collect()
     }
@@ -136,6 +158,21 @@ fn set_state(peer_id: &str, state: &Arc<Mutex<SessionState>>, new_state: Session
     }
 }
 
+fn set_backoff(backoff_until: &Arc<Mutex<Option<Instant>>>, until: Option<Instant>) {
+    let mut slot = backoff_until.lock().unwrap();
+    *slot = until;
+}
+
+fn in_backoff(backoff_until: &Arc<Mutex<Option<Instant>>>) -> bool {
+    let now = Instant::now();
+    let deadline = *backoff_until.lock().unwrap();
+    matches!(deadline, Some(t) if t > now)
+}
+
+fn clear_backoff(backoff_until: &Arc<Mutex<Option<Instant>>>) {
+    set_backoff(backoff_until, None);
+}
+
 /// 每个 peer 一个独立线程：
 /// - 维护 addr / stream / pending queue
 /// - 断线重连
@@ -148,12 +185,14 @@ fn peer_worker_loop(
     initial_addr: String,
     state: Arc<Mutex<SessionState>>,
     shared_addr: Arc<Mutex<Option<String>>>,
+    backoff_until: Arc<Mutex<Option<Instant>>>,
 ) {
     let mut peer_addr: Option<String> = Some(initial_addr);
     let mut stream: Option<TcpStream> = None;
 
     let mut pending: VecDeque<Vec<u8>> = VecDeque::new();
     const MAX_PENDING: usize = 128;
+    const BACKOFF_SECS: u64 = 1;
 
     fn ensure_connected(
         peer_id: &str,
@@ -172,7 +211,6 @@ fn peer_worker_loop(
         let mut s = TcpStream::connect(peer_addr)?;
         s.set_nodelay(true).ok();
 
-        // 连接建立后发 hello（后面做认证握手时会替换/增强）
         let hello = uniclip_proto::WireMessage::Hello {
             version: uniclip_proto::PROTOCOL_VERSION,
             device: uniclip_core::DeviceInfo {
@@ -190,7 +228,6 @@ fn peer_worker_loop(
     }
 
     loop {
-        // 1) 尝试收命令，但不要永远阻塞
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(PeerCmd::UpdateAddr(addr)) => {
                 if peer_addr.as_deref() != Some(addr.as_str()) {
@@ -200,7 +237,8 @@ fn peer_worker_loop(
                         let mut slot = shared_addr.lock().unwrap();
                         *slot = Some(addr);
                     }
-                    stream = None; // 强制重连到新地址
+                    stream = None;
+                    clear_backoff(&backoff_until);
                     set_state(&peer_id, &state, SessionState::Disconnected);
                 }
             }
@@ -212,26 +250,34 @@ fn peer_worker_loop(
             }
             Ok(PeerCmd::Shutdown) => {
                 println!("[peer:{}] shutdown", peer_id);
+                clear_backoff(&backoff_until);
                 set_state(&peer_id, &state, SessionState::Disconnected);
                 break;
             }
-            Err(RecvTimeoutError::Timeout) => {
-                // 没有新命令：继续往下走，尝试重连/flush
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 println!("[peer:{}] channel closed", peer_id);
+                clear_backoff(&backoff_until);
                 set_state(&peer_id, &state, SessionState::Disconnected);
                 break;
             }
         }
 
-        // 2) 没有待发消息，就别白连
         if pending.is_empty() {
+            // 没有待发任务时，如果不在连接中，也尽量回到 Disconnected
+            if stream.is_none() && !in_backoff(&backoff_until) {
+                set_state(&peer_id, &state, SessionState::Disconnected);
+            }
             continue;
         }
 
-        // 3) flush pending
+        if in_backoff(&backoff_until) {
+            set_state(&peer_id, &state, SessionState::Backoff);
+            continue;
+        }
+
         let Some(addr) = peer_addr.clone() else {
+            clear_backoff(&backoff_until);
             set_state(&peer_id, &state, SessionState::Disconnected);
             continue;
         };
@@ -244,20 +290,27 @@ fn peer_worker_loop(
             &device_name,
             &state,
         ) {
-            println!("[peer:{}] connect fail: {} (retry 1s)", peer_id, e);
+            println!(
+                "[peer:{}] connect fail: {} (retry {}s)",
+                peer_id, e, BACKOFF_SECS
+            );
+            let until = Instant::now() + Duration::from_secs(BACKOFF_SECS);
+            set_backoff(&backoff_until, Some(until));
             set_state(&peer_id, &state, SessionState::Backoff);
-            thread::sleep(Duration::from_secs(1));
-            set_state(&peer_id, &state, SessionState::Disconnected);
             continue;
         }
+
+        clear_backoff(&backoff_until);
 
         while let Some(payload) = pending.pop_front() {
             if let Some(s) = stream.as_mut() {
                 if let Err(e) = net::send_frame(s, &payload) {
                     println!("[peer:{}] send failed: {} (drop connection)", peer_id, e);
                     stream = None;
-                    set_state(&peer_id, &state, SessionState::Disconnected);
-                    pending.push_front(payload); // 放回去，重连后重发
+                    let until = Instant::now() + Duration::from_secs(BACKOFF_SECS);
+                    set_backoff(&backoff_until, Some(until));
+                    set_state(&peer_id, &state, SessionState::Backoff);
+                    pending.push_front(payload);
                     break;
                 } else {
                     println!("[SENT peer={}] ClipboardPush", peer_id);

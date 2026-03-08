@@ -48,7 +48,7 @@ fn start_listener(
                 }
             };
 
-            println!("[peer connected] {}",
+            println!("[inbound peer connected] {}",
                     stream
                         .peer_addr()
                         .ok()
@@ -60,7 +60,7 @@ fn start_listener(
                 let frame = match recv_frame(&mut stream) {
                     Ok(f) => f,
                     Err(e) => {
-                        println!("[peer disconnected] {}", e);
+                        println!("[inbound peer disconnected] {}", e);
                         break;
                     }
                 };
@@ -224,7 +224,7 @@ fn cmd_run(listen_port: u16, manual_peer: Option<String>) -> Result<()> {
     std::thread::spawn(move || loop {
         let sessions = pm_debug.list_sessions();
         if !sessions.is_empty() {
-            println!("[sessions] {:?}", sessions);
+            println!("[outbound sessions] {:?}", sessions);
         }
         std::thread::sleep(std::time::Duration::from_secs(5));
     });
