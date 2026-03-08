@@ -43,6 +43,15 @@ impl TrustStore {
         &self.app.config.trusted_peers
     }
 
+    pub fn list_trusted_peers(&self) -> Vec<(String, crate::PeerRecord)> {
+        self.app
+            .config
+            .trusted_peers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     pub fn is_trusted(&self, peer_id: &str) -> bool {
         self.app.config.trusted_peers.contains_key(peer_id)
     }

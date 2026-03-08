@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crate::clipboard::{ArboardClipboard, ClipboardBackend};
+use crate::pairing_service::PairingService;
 
-use uniclip_core::{make_text_item, ClipboardPayload, PairingInfo, RecentSet};
+use uniclip_core::{make_text_item, ClipboardPayload, RecentSet};
 use uniclip_discovery::mdns;
 use uniclip_store::{TrustStore, PeerRecord};
 use uniclip_transport::{recv_frame, PeerManager};
@@ -185,32 +186,23 @@ fn usage() -> ! {
 }
 
 fn cmd_show_pairing(listen_port: u16) -> Result<()> {
-    let store = TrustStore::load(listen_port)?;
-    let info = store.pairing_info();
-    let s = serde_json::to_string(&info)?;
+    let store = Arc::new(Mutex::new(TrustStore::load(listen_port)?));
+    let pairing = PairingService::new(store);
+
+    let s = pairing.export_pairing_json()?;
     println!("{}", s);
     Ok(())
 }
 
 fn cmd_pair(listen_port: u16, pairing_json: &str) -> Result<()> {
-    let mut store = TrustStore::load(listen_port)?;
+    let store = Arc::new(Mutex::new(TrustStore::load(listen_port)?));
+    let pairing = PairingService::new(store);
 
-    let info: PairingInfo =
-        serde_json::from_str(pairing_json).map_err(|e| anyhow!("invalid pairing json: {}", e))?;
-
-    let now_ms = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    let device_id = info.device_id.clone();
-    let device_name = info.device_name.clone();
-
-    store.add_peer(info, now_ms)?;
+    let info = pairing.import_pairing_json(pairing_json)?;
 
     println!(
         "[paired] added device_id={} name={}",
-        device_id, device_name
+        info.device_id, info.device_name
     );
     Ok(())
 }
