@@ -1,0 +1,15 @@
+[package]
+name = "uniclip-store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+hostname.workspace = true
+
+uniclip-core = { path = "../uniclip-core" }
+uniclip-crypto = { path = "../uniclip-crypto" }

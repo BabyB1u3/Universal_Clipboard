@@ -1,25 +1,40 @@
 use anyhow::{anyhow, Result};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo, ScopedIp};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::collections::{HashSet};
 
 pub const SERVICE_TYPE: &str = "_uniclip._tcp.local.";
 
-fn pick_ip(addrs: impl Iterator<Item = IpAddr>) -> Option<IpAddr> {
-    // 优先选 IPv4 且非 loopback
-    let mut v4 = None;
-    let mut other = None;
-    for ip in addrs {
-        if ip.is_loopback() {
-            continue;
-        }
-        if ip.is_ipv4() && v4.is_none() {
-            v4 = Some(ip);
-        } else if other.is_none() {
-            other = Some(ip);
+fn pick_ip_scoped(addresses: &HashSet<ScopedIp>) -> Option<IpAddr> {
+    // 优先 IPv4 非 loopback
+    for s in addresses.iter() {
+        if s.is_ipv4() && !s.is_loopback() {
+            return Some(s.to_ip_addr());
         }
     }
-    v4.or(other)
+    // 退而求其次：任何非 loopback
+    for s in addresses.iter() {
+        if !s.is_loopback() {
+            return Some(s.to_ip_addr());
+        }
+    }
+    None
+}
+
+fn make_local_server(device_name: &str) -> String {
+    let mut n = device_name.trim().to_string();
+    if n.is_empty() {
+        n = "device".to_string();
+    }
+    // avoid user giving "xxx.local" or "xxx.local."
+    if n.ends_with(".local.") {
+        n
+    } else if n.ends_with(".local") {
+        format!("{}.", n)
+    } else {
+        format!("{}.local.", n)
+    }
 }
 
 /// 广播本机服务（mDNS advertise）
@@ -31,11 +46,9 @@ pub fn advertise(
 ) -> Result<()> {
     // instance_name 必须在局域网内尽量唯一
     let inst = format!("{}-{}", device_name, &device_id[..device_id.len().min(8)]);
-    let hn = hostname::get()
-        .map_err(|e| anyhow!("hostname get: {}", e))?
-        .to_string_lossy()
-        .to_string();
-    let host = format!("{}.local.", hn);
+    
+    let host = make_local_server(&device_name);
+
     // 取本机 IPv4
     let ip = local_ip_address::local_ip()
         .map_err(|e| anyhow!("local_ip: {}", e))?;
@@ -55,6 +68,7 @@ pub fn advertise(
 
     daemon.register(service_info)
         .map_err(|e| anyhow!("mdns register: {}", e))?;
+    println!("[mdns] advertised {} on {} {}:{}", SERVICE_TYPE, host, ip, listen_port);
     Ok(())
 }
 
@@ -65,13 +79,16 @@ pub fn browse_peers<F>(
     mut on_peer: F,
 ) -> Result<()>
 where
-    F: FnMut(String, String) + Send + 'static,
+    F: FnMut(String /*addr*/, String /*peer_id*/) + Send + 'static,
 {
-    let receiver = daemon.browse(SERVICE_TYPE)
+    let receiver = daemon
+        .browse(SERVICE_TYPE)
         .map_err(|e| anyhow!("mdns browse: {}", e))?;
 
     std::thread::spawn(move || {
-        for event in receiver {
+        println!("[mdns] browse thread started for {}", SERVICE_TYPE);
+
+        while let Ok(event) = receiver.recv() {
             match event {
                 ServiceEvent::ServiceFound(ty, fullname) => {
                     println!("[mdns] found: type={} name={}", ty, fullname);
@@ -96,10 +113,11 @@ where
 
                     // 取 IP + port
                     let port = info.get_port();
-                    let ip = pick_ip(info.get_addresses().iter().copied());
+                    let ip = pick_ip_scoped(&info.addresses);
                     let Some(ip) = ip else { continue; };
 
                     let addr = format!("{}:{}", ip, port);
+
                     on_peer(addr, peer_id);
                 }
                 ServiceEvent::ServiceRemoved(ty, fullname) => {

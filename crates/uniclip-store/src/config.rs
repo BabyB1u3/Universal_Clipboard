@@ -50,6 +50,8 @@ fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     Ok(serde_json::from_str(&s)?)
 }
 
+// TODO: 现在是 fs::write，如果进程崩溃可能写一半
+// 改为：写到 config.json.tmp + fsync + rename 覆盖
 fn save_json_pretty<T: Serialize>(path: &Path, v: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(v)?;
     fs::write(path, s)?;
